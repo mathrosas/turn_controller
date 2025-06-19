@@ -120,7 +120,7 @@ private:
   double phi_;
   double w_, l_, r_;
 
-  double ang_tol = 0.05;
+  double ang_tol = 0.01;
 
   int scene_number_;
 
@@ -212,11 +212,6 @@ private:
     RCLCPP_INFO(get_logger(), "Stop");
   }
 
-  /// wrap into [-π,π]
-  static double normalize_angle(double a) {
-    return std::atan2(std::sin(a), std::cos(a));
-  }
-
   /// reconstruct full yaw from (x,y,z,w)
   static double quat_to_yaw(double qz, double qw) {
     return 2.0 * std::atan2(qz, qw);
@@ -226,7 +221,20 @@ private:
 
     switch (scene_number_) {
     case 1: { // Simulation
-      motions_ = {{0, 0, -1.5708}, {0, 0, 1.5708}, {0.0, 0.0, 2.3562}};
+      const double z1 = -0.1986693308, w1 = 0.9800665778;
+      const double z2 = -0.0871557427, w2 = 0.9961946981;
+      const double z3 = 0.1736481777, w3 = 0.9848077530;
+
+      double abs1 = quat_to_yaw(z1, w1);
+      double abs2 = quat_to_yaw(z2, w2);
+      double abs3 = quat_to_yaw(z3, w3);
+
+      // 2) compute the true relatives
+      double yaw1 = abs1 - phi_; // from your starting phi_ to abs1
+      double yaw2 = abs2 - abs1; // from abs1 to abs2
+      double yaw3 = abs3 - abs2;
+
+      motions_ = {{0.0, 0.0, yaw1}, {0.0, 0.0, yaw2}, {0.0, 0.0, yaw3}};
     }; break;
 
     case 2: // CyberWorld
