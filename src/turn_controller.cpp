@@ -212,7 +212,6 @@ private:
     RCLCPP_INFO(get_logger(), "Stop");
   }
 
-  /// reconstruct full yaw from (x,y,z,w)
   static double quat_to_yaw(double qz, double qw) {
     return 2.0 * std::atan2(qz, qw);
   }
@@ -229,17 +228,29 @@ private:
       double abs2 = quat_to_yaw(z2, w2);
       double abs3 = quat_to_yaw(z3, w3);
 
-      // 2) compute the true relatives
-      double yaw1 = abs1 - phi_; // from your starting phi_ to abs1
-      double yaw2 = abs2 - abs1; // from abs1 to abs2
+      double yaw1 = abs1 - phi_;
+      double yaw2 = abs2 - abs1;
       double yaw3 = abs3 - abs2;
 
       motions_ = {{0.0, 0.0, yaw1}, {0.0, 0.0, yaw2}, {0.0, 0.0, yaw3}};
     }; break;
 
-    case 2: // CyberWorld
-      motions_ = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
-      break;
+    case 2: { // CyberWorld
+      const double z1 = -0.6086640760558524, w1 = 0.7934280323501783;
+      const double z2 = -0.6086640760558524, w2 = 0.7934280323501783;
+      const double z3 = -0.6086640760558524, w3 = 0.7934280323501783;
+
+      double abs1 = quat_to_yaw(z1, w1);
+      double abs2 = quat_to_yaw(z2, w2);
+      double abs3 = quat_to_yaw(z3, w3);
+
+      //   double yaw1 = abs1 - phi_;
+      double yaw1 = abs1 - phi_;
+      double yaw2 = abs2 - abs1;
+      double yaw3 = abs3 - abs2;
+
+      motions_ = {{0.0, 0.0, yaw1}, {0.0, 0.0, yaw2}, {0.0, 0.0, yaw3}};
+    } break;
 
     default:
       RCLCPP_ERROR(this->get_logger(), "Invalid Scene Number: %d",
