@@ -40,7 +40,7 @@ public:
 
   void run() {
     // PID gains
-    const double Kp = 0.5, Ki = 0.0, Kd = 0.05;
+    const double Kp = 0.5, Ki = 0.05, Kd = 0.1;
     // State variables
     double error_phi = 0.0;
     double error_phi_prev = 0.0;
@@ -93,18 +93,18 @@ public:
         error_phi_prev = error_phi;
 
         // ——— publish via holonomic pipeline ———
-        //  1) world→body twist
+        //  1) world->body twist
         auto [wz, vx, vy] = velocity2twist(PID_phi, 0.0, 0.0);
-        //  2) twist→wheel speeds
+        //  2) twist->wheel speeds
         auto wheels = twist2wheels(wz, 0.0, 0.0);
-        //  3) wheel speeds→safe Twist & publish
+        //  3) wheel speeds->safe Twist & publish
         wheels2twist(wheels);
 
         rclcpp::spin_some(shared_from_this());
         rclcpp::sleep_for(25ms);
 
         // ——— debug print ———
-        RCLCPP_INFO(get_logger(), "angle_error=%.3f → ω_cmd=%.3f", error_phi,
+        RCLCPP_INFO(get_logger(), "angle_error=%.3f -> w_cmd=%.3f", error_phi,
                     PID_phi);
       }
 
@@ -164,7 +164,7 @@ private:
   }
 
   void wheels2twist(std::vector<float> wheels) {
-    // Holonomic drive matrix H_ (4x3): maps wheel velocities [ω, vx, vy] to
+    // Holonomic drive matrix H_ (4x3): maps wheel velocities [w, vx, vy] to
     // wheel speeds
     Eigen::Matrix<float, 4, 3> H_;
     H_ << -l_ - w_, 1, -1, l_ + w_, 1, 1, l_ + w_, 1, -1, -l_ - w_, 1, 1;
@@ -189,7 +189,7 @@ private:
     Eigen::Matrix<float, 3, 4> H_pinv =
         svd.matrixV() * S_pinv * svd.matrixU().transpose();
 
-    // Compute wheel velocities: [ω, vx, vy] = H_pinv * U
+    // Compute wheel velocities: [w, vx, vy] = H_pinv * U
     Eigen::Matrix<float, 3, 1> wheel_vel = H_pinv * U;
 
     // Convert to Twist message
@@ -199,7 +199,7 @@ private:
     twist.linear.y = wheel_vel(2);
 
     RCLCPP_INFO(get_logger(),
-                "Computed wheel velocities ω: %.3f, vx: %.3f, vy: %.3f",
+                "Computed wheel velocities w: %.3f, vx: %.3f, vy: %.3f",
                 wheel_vel(0), wheel_vel(1), wheel_vel(2));
 
     // Publish to /cmd_vel
@@ -208,48 +208,38 @@ private:
 
   void stop() {
     geometry_msgs::msg::Twist twist;
-    pub_->publish(twist);
-    RCLCPP_INFO(get_logger(), "Stop");
+    rclcpp::Rate rate(20);
+    for (int i = 0; i < 20; ++i) {
+      pub_->publish(twist);
+      rclcpp::spin_some(shared_from_this());
+      rate.sleep();
+    }
+    RCLCPP_INFO(get_logger(), "Stop (zeroed for 0.5 s)");
   }
 
-  static double quat_to_yaw(double qz, double qw) {
-    return 2.0 * std::atan2(qz, qw);
-  }
+  //   static double quat_to_yaw(double qz, double qw) {
+  //     return 2.0 * std::atan2(qz, qw);
+  //   }
 
   void select_waypoints() {
 
     switch (scene_number_) {
     case 1: { // Simulation
-      const double z1 = -0.1986693308, w1 = 0.9800665778;
-      const double z2 = -0.0871557427, w2 = 0.9961946981;
-      const double z3 = 0.1736481777, w3 = 0.9848077530;
 
-      double abs1 = quat_to_yaw(z1, w1);
-      double abs2 = quat_to_yaw(z2, w2);
-      double abs3 = quat_to_yaw(z3, w3);
+      double yaw1 = -1.000;
+      double yaw2 = -0.150;
+      double yaw3 = 0.700;
 
-      double yaw1 = abs1 - phi_;
-      double yaw2 = abs2 - abs1;
-      double yaw3 = abs3 - abs2;
-
-      motions_ = {{0.0, 0.0, yaw1}, {0.0, 0.0, yaw2}, {0.0, 0.0, yaw3}};
+      motions_ = {{0, 0, yaw1}, {0, 0, yaw2 - yaw1}, {0, 0, yaw3 - yaw2}};
     }; break;
 
     case 2: { // CyberWorld
-      const double z1 = -0.6086640760558524, w1 = 0.7934280323501783;
-      const double z2 = -0.6086640760558524, w2 = 0.7934280323501783;
-      const double z3 = -0.6086640760558524, w3 = 0.7934280323501783;
 
-      double abs1 = quat_to_yaw(z1, w1);
-      double abs2 = quat_to_yaw(z2, w2);
-      double abs3 = quat_to_yaw(z3, w3);
+      double yaw1 = -0.500;
+      double yaw2 = -1.396;
+      double yaw3 = 1.396;
 
-      //   double yaw1 = abs1 - phi_;
-      double yaw1 = abs1 - phi_;
-      double yaw2 = abs2 - abs1;
-      double yaw3 = abs3 - abs2;
-
-      motions_ = {{0.0, 0.0, yaw1}, {0.0, 0.0, yaw2}, {0.0, 0.0, yaw3}};
+      motions_ = {{0.0, 0.0, yaw1}, {0.0, 0.0, yaw2 - yaw1}, {0.0, 0.0, yaw3}};
     } break;
 
     default:
