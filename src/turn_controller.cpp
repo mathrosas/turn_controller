@@ -235,9 +235,9 @@ private:
 
     case 2: { // CyberWorld
 
-      double yaw1 = -0.500;
-      double yaw2 = -1.396;
-      double yaw3 = 1.396;
+      double yaw1 = -0.30;
+      double yaw2 = -1.00;
+      double yaw3 = 1.00;
 
       motions_ = {{0.0, 0.0, yaw1}, {0.0, 0.0, yaw2 - yaw1}, {0.0, 0.0, yaw3}};
     } break;
