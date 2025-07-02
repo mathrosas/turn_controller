@@ -90,6 +90,8 @@ public:
         // ——— save for next step ———
         error_phi_prev = error_phi;
 
+        twist.linear.x = 0.00;
+        twist.linear.y = 0.00;
         twist.angular.z = PID_phi;
 
         // Publish to /cmd_vel
