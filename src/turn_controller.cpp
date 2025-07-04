@@ -143,29 +143,19 @@ private:
     RCLCPP_INFO(get_logger(), "Stop (zeroed for 0.5 s)");
   }
 
-  //   static double quat_to_yaw(double qz, double qw) {
-  //     return 2.0 * std::atan2(qz, qw);
-  //   }
-
   void select_waypoints() {
 
     switch (scene_number_) {
     case 1: { // Simulation
 
-      double yaw1 = -1.000;
-      double yaw2 = -0.150;
-      double yaw3 = 0.700;
+      motions_ = {{0.0, 0.0, -1.00}, {0.0, 0.0, 0.85}, {0.0, 0.0, 0.70}};
 
-      motions_ = {{0, 0, yaw1}, {0, 0, yaw2 - yaw1}, {0, 0, yaw3 - yaw2}};
     }; break;
 
     case 2: { // CyberWorld
 
-      double yaw1 = -0.30;
-      double yaw2 = -1.00;
-      double yaw3 = 1.00;
+      motions_ = {{0.0, 0.0, -0.50}, {0.0, 0.0, -0.80}, {0.0, 0.0, 1.20}};
 
-      motions_ = {{0.0, 0.0, yaw1}, {0.0, 0.0, yaw2 - yaw1}, {0.0, 0.0, yaw3}};
     } break;
 
     default:
