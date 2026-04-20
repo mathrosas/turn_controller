@@ -52,6 +52,37 @@ dφ = -1.00, +0.85, +0.70  (rad)
 dφ = -0.50, -0.80, +1.30  (rad)
 ```
 
+## Real Robot Deployment (CyberWorld)
+
+<p align="center">
+  <img src="media/waypoints-real.png" alt="Real ROSBot XL turn-controller yaw trace recorded in CyberWorld" width="650"/>
+</p>
+
+The same executable runs **unmodified** on the real Husarion ROSBot XL in The Construct's **CyberWorld** lab — only the scene number changes. The `scene_number = 2` yaw sequence (`-0.50, -0.80, +1.30 rad`) is tuned so the robot stays inside the physical arena without clipping walls:
+
+1. The ROSBot XL real-robot stack (`rosbot_xl_ros` + EKF + wheel controllers) runs on the physical robot; `/odometry/filtered` is streamed to the development machine
+2. The `turn_controller` node is launched locally with `scene_number = 2`:
+
+   ```bash
+   ros2 run turn_controller turn_controller 2
+   ```
+3. The quaternion → yaw extraction (`tf2::Matrix3x3::getRPY`) works identically on real odometry — the EKF publishes the same `nav_msgs/Odometry` contract
+4. The real-robot trace validates:
+   - `ang_tol = 0.01 rad` (~0.57°) is reachable on hardware without chattering thanks to the `W_MAX = 0.4 rad/s` cap + `25 ms` control loop
+   - The net accumulated yaw `-0.50 − 0.80 + 1.30 = 0 rad` returns the robot to its original heading — a good closed-loop sanity check
+   - Integral wind-up clamp (`±1.0`) absorbs the larger `0.80 rad` second segment without overshoot
+
+### Sim ↔ real parity
+
+| Concern | Simulation (scene 1) | Real CyberWorld (scene 2) |
+|---|---|---|
+| Feedback topic | `/odometry/filtered` | `/odometry/filtered` |
+| Turn sequence | `-1.00, +0.85, +0.70 rad` | `-0.50, -0.80, +1.30 rad` |
+| Net yaw | `+0.55 rad` | `0 rad` (returns to start) |
+| PID gains | `Kp=0.5, Ki=0.05, Kd=0.1` | `Kp=0.5, Ki=0.05, Kd=0.1` (unchanged) |
+| Tolerance | `0.01 rad` | `0.01 rad` |
+| Clock | sim time | wall clock |
+
 ## ROS 2 Interface
 
 | Name | Type | Description |
