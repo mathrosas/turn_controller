@@ -1,49 +1,66 @@
-#include <Eigen/Dense>
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/float32_multi_array.hpp>
-#include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/impl/utils.h>
 
 using namespace std::chrono_literals;
 
+static inline float wrapPi(float a) {
+  return std::atan2(std::sin(a), std::cos(a));
+}
+
+struct Waypoint {
+  float dx, dy, dphi;
+};
+
 class TurnController : public rclcpp::Node {
 public:
   TurnController(int scene_number)
       : Node("turn_controller"), scene_number_(scene_number), got_odom_(false),
-        wp_reached_(false), init_(true), paused_(false), target_wp_(0) {
+        wp_reached_(false), init_(true), paused_(false), has_last_time_(false),
+        target_wp_(0) {
     twist_pub_ =
         this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
         "/odometry/filtered", 10,
         std::bind(&TurnController::odomCallback, this, std::placeholders::_1));
     timer_ = this->create_wall_timer(
-        200ms, std::bind(&TurnController::executeCallback, this));
+        50ms, std::bind(&TurnController::executeCallback, this));
 
-    SelectWaypoints();
     clock_ = std::make_shared<rclcpp::Clock>(RCL_ROS_TIME);
+    SelectWaypoints();
+  }
+
+  void stopRobot() {
+    auto stop = geometry_msgs::msg::Twist();
+    for (int i = 0; i < 5; ++i) {
+      twist_pub_->publish(stop);
+    }
   }
 
 private:
   void SelectWaypoints() {
-    // Waypoints [dx, dy, dphi] in robot frame
+    // Waypoints [dx, dy, dphi] in BODY frame.
     switch (scene_number_) {
     case 1: // Simulation
       waypoints_ = {{
-          {0.0, 0.0, -0.912}, // w1
-          {0.0, 0.0, 0.7576}, // w2
-          {0.0, 0.0, 0.8504}, // w3
+          {0.0f, 0.0f, -0.912f},
+          {0.0f, 0.0f, 0.7576f},
+          {0.0f, 0.0f, 0.8504f},
       }};
       break;
 
     case 2: // CyberWorld
       waypoints_ = {{
-          {0.0, 0.0, -0.535}, // w1
-          {0.0, 0.0, -0.795}, // w2
-          {0.0, 0.0, 1.311},  // w3
+          {0.0f, 0.0f, -0.535f},
+          {0.0f, 0.0f, -0.795f},
+          {0.0f, 0.0f, 1.311f},
       }};
       break;
 
@@ -54,89 +71,107 @@ private:
   }
 
   void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-    auto orientation = msg->pose.pose.orientation;
-    tf2::Quaternion q(orientation.x, orientation.y, orientation.z,
-                      orientation.w);
-    current_pose_(0) = msg->pose.pose.position.x;
-    current_pose_(1) = msg->pose.pose.position.y;
-    current_pose_(2) = tf2::impl::getYaw(q);
+    const auto &o = msg->pose.pose.orientation;
+    tf2::Quaternion q(o.x, o.y, o.z, o.w);
+    current_yaw_ = tf2::impl::getYaw(q);
     got_odom_ = true;
+  }
+
+  void resetPIDState() {
+    prev_err_ = 0.0f;
+    integral_err_ = 0.0f;
+    d_filt_ = 0.0f;
+    has_last_time_ = false;
   }
 
   void executeCallback() {
     if (!got_odom_) {
-      RCLCPP_WARN(this->get_logger(), "Odom data not received!");
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 2000,
+                           "Odom data not received!");
       return;
     }
 
-    // Paused state
+    const rclcpp::Time now = clock_->now();
+
     if (paused_) {
-      rclcpp::Time now = clock_->now();
-      // Check if 2 seconds have elapsed
       if ((now - pause_time_).seconds() >= 2.0) {
         paused_ = false;
+        resetPIDState();
       } else {
-        auto msg = geometry_msgs::msg::Twist();
-        twist_pub_->publish(msg);
+        auto stop = geometry_msgs::msg::Twist();
+        twist_pub_->publish(stop);
         return;
       }
     }
 
-    // Update target waypoint
+    // Latch target yaw on waypoint change.
     if (wp_reached_ || init_) {
-      target_pose_ = current_pose_ + waypoints_[target_wp_];
-
-      wp_reached_ = false;
+      target_yaw_ = wrapPi(current_yaw_ + waypoints_[target_wp_].dphi);
       init_ = false;
-      size_t twp = target_wp_ + 1;
-      RCLCPP_INFO(this->get_logger(), "Turning to next waypoint: %ld", twp);
+      wp_reached_ = false;
+      resetPIDState();
+      RCLCPP_INFO(this->get_logger(),
+                  "WP %zu target yaw: %.3f rad (current %.3f)", target_wp_ + 1,
+                  target_yaw_, current_yaw_);
     }
 
-    // Error vector
-    Eigen::Vector3f error_pose = target_pose_ - current_pose_;
+    // Time step
+    double dt = 0.05;
+    if (has_last_time_) {
+      dt = (now - last_time_).seconds();
+    }
+    dt = std::clamp(dt, 1e-3, 0.2);
+    last_time_ = now;
+    has_last_time_ = true;
+    const float dtf = static_cast<float>(dt);
 
-    // Check distance to target
-    if (error_pose.norm() < 0.02) {
-      auto msg = geometry_msgs::msg::Twist();
-      twist_pub_->publish(msg);
+    // Yaw error, wrapped to [-pi, pi]
+    const float err = wrapPi(target_yaw_ - current_yaw_);
 
-      prev_error_ = {0.0, 0.0, 0.0};
-      integral_error_ = {0.0, 0.0, 0.0};
+    // Acceptance: yaw only (no translation commanded, so no XY error matters)
+    if (std::abs(err) < yaw_tol_) {
+      auto stop = geometry_msgs::msg::Twist();
+      twist_pub_->publish(stop);
       wp_reached_ = true;
       target_wp_++;
 
       if (target_wp_ >= waypoints_.size()) {
         RCLCPP_INFO(this->get_logger(), "Final waypoint reached!");
+        stopRobot();
         rclcpp::shutdown();
-      } else {
-        // Start the pause timer
-        pause_time_ = clock_->now();
-        paused_ = true;
-        RCLCPP_INFO(this->get_logger(),
-                    "Waypoint reached, stopping briefly...");
+        return;
       }
+      pause_time_ = now;
+      paused_ = true;
+      RCLCPP_INFO(this->get_logger(), "Waypoint %zu reached, pausing...",
+                  target_wp_);
       return;
     }
 
-    // PID Controller (Proportional + Integral + Derivative)
+    // Filtered derivative
+    const float d_raw = (err - prev_err_) / dtf;
+    d_filt_ = alpha_d_ * d_raw + (1.0f - alpha_d_) * d_filt_;
 
-    integral_error_ += error_pose; // Sum of errors over time
-    integral_error_(0) =
-        std::clamp(integral_error_(0), -int_limit_, int_limit_);
-    integral_error_(1) =
-        std::clamp(integral_error_(1), -int_limit_, int_limit_);
-    integral_error_(2) =
-        std::clamp(integral_error_(2), -int_limit_, int_limit_);
+    // PID
+    const float omega_unsat = Kp_ * err + Kd_ * d_filt_ + Ki_ * integral_err_;
+    const float omega_sat =
+        std::clamp(omega_unsat, -max_ang_vel_, max_ang_vel_);
 
-    Eigen::Vector3f V = Kp_ * error_pose + Kd_ * (error_pose - prev_error_) +
-                        Ki_ * integral_error_;
-    prev_error_ = error_pose; // for next iteration
+    // Conditional integration anti-windup
+    const bool saturated =
+        (std::abs(omega_unsat) >= max_ang_vel_) &&
+        ((omega_unsat > 0 && err > 0) || (omega_unsat < 0 && err < 0));
+    if (!saturated) {
+      integral_err_ += err * dtf;
+      integral_err_ = std::clamp(integral_err_, -int_limit_, int_limit_);
+    }
+    prev_err_ = err;
 
-    // Publish velocities
-    auto cmd_vel = geometry_msgs::msg::Twist();
-    cmd_vel.linear.x = std::clamp(V(0), -max_lin_vel_, max_lin_vel_);
-    cmd_vel.linear.y = std::clamp(V(1), -max_lin_vel_, max_lin_vel_);
-    cmd_vel.angular.z = std::clamp(V(2), -max_ang_vel_, max_ang_vel_);
+    // Pure rotation — zero linear channels explicitly
+    geometry_msgs::msg::Twist cmd_vel;
+    cmd_vel.linear.x = 0.0;
+    cmd_vel.linear.y = 0.0;
+    cmd_vel.angular.z = omega_sat;
     twist_pub_->publish(cmd_vel);
   }
 
@@ -144,38 +179,43 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Time pause_time_;
+  rclcpp::Time last_time_;
   int scene_number_;
-  bool got_odom_, wp_reached_, init_, paused_;
+  bool got_odom_, wp_reached_, init_, paused_, has_last_time_;
   size_t target_wp_;
   std::shared_ptr<rclcpp::Clock> clock_;
-  Eigen::Vector3f current_pose_{0.0, 0.0, 0.0};
-  Eigen::Vector3f target_pose_{0.0, 0.0, 0.0};
-  Eigen::Vector3f prev_error_{0.0, 0.0, 0.0};
-  Eigen::Vector3f integral_error_{0.0, 0.0, 0.0};
-  std::array<Eigen::Vector3f, 3> waypoints_;
 
-  // PID Gains
-  const float Kp_ = 0.8;
-  const float Ki_ = 0.01, int_limit_ = 5.0;
-  const float Kd_ = 0.4;
-  const float max_lin_vel_ = 0.25;
-  const float max_ang_vel_ = 0.8;
+  float current_yaw_{0.0f};
+  float target_yaw_{0.0f};
+  float prev_err_{0.0f};
+  float integral_err_{0.0f};
+  float d_filt_{0.0f};
+  std::array<Waypoint, 3> waypoints_;
+
+  // PID gains and limits (tuned down from original for real-robot safety)
+  const float Kp_ = 1.5f;
+  const float Ki_ = 0.0f;
+  const float Kd_ = 0.10f;
+  const float int_limit_ = 0.5f;
+  const float alpha_d_ = 0.2f;
+  const float max_ang_vel_ = 0.9f;
+
+  // Acceptance tolerance
+  const float yaw_tol_ = 0.03f;
 };
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
 
-  // Check if a scene number argument is provided
-  int scene_number = 2; // Default scene number to simulation
+  int scene_number = 2; // default: real
   if (argc > 1) {
     scene_number = std::atoi(argv[1]);
   }
 
-  auto controller_node = std::make_shared<TurnController>(scene_number);
-  rclcpp::executors::MultiThreadedExecutor executor;
-  executor.add_node(controller_node);
-  executor.spin();
+  auto node = std::make_shared<TurnController>(scene_number);
+  rclcpp::spin(node);
 
+  node->stopRobot();
   rclcpp::shutdown();
   return 0;
 }
