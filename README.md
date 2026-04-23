@@ -1,6 +1,6 @@
 # Checkpoint 17 — Turn Controller
 
-ROS 2 C++ **PID yaw controller** for the **Husarion ROSBot XL**. The node drives the robot through a chain of relative yaw deltas by closing the loop on the **angular error** between the accumulated goal heading and the yaw extracted from the EKF-fused odometry. Outputs a pure-rotation `geometry_msgs/Twist` (`angular.z` only, linear channels held at zero) on `/cmd_vel`. Works against both the Gazebo simulation and the real CyberWorld ROSBot XL — the waypoint list is selected from a **scene number** passed as a CLI argument.
+ROS 2 C++ **PID yaw controller** for the **Husarion ROSBot XL**. The node drives the robot through a chain of relative yaw deltas by running a **PD controller with filtered derivative and conditional anti-windup** on the angular error between the accumulated goal heading and the yaw extracted from the EKF-fused odometry. It outputs a pure-rotation `geometry_msgs/Twist` (`angular.z` only, linear channels held at zero) on `/cmd_vel`. Works against both the Gazebo simulation and the real CyberWorld ROSBot XL — the waypoint list is selected from a **scene number** passed as a CLI argument, and the **CyberWorld scene is the default**.
 
 <p align="center">
   <img src="media/waypoints-sim.png" alt="ROSBot XL turn-controller yaw trace in simulation" width="650"/>
@@ -14,43 +14,53 @@ ROS 2 C++ **PID yaw controller** for the **Husarion ROSBot XL**. The node drives
 
 ### Control Loop
 
-1. A single-node executable `turn_controller` subscribes to `/odometry/filtered` (`nav_msgs/Odometry`) and publishes `geometry_msgs/Twist` on `/cmd_vel`
-2. In `odom_callback`, the current yaw `φ` is extracted from the pose quaternion via `tf2::Matrix3x3::getRPY`
-3. On construction it calls `select_waypoints(scene_number)` — `1` loads the sim yaw list, `2` loads the CyberWorld list
-4. `run()` blocks until a `/cmd_vel` subscriber is connected, then iterates over the `[_, _, dφ]` motion list, accumulating each relative `dφ` into an absolute goal yaw `goal_φ`
-5. Per iteration (`25 ms` loop, timed with `std::chrono::steady_clock`):
-   - Angular error `e_φ = goal_φ − φ`
-   - PID on `e_φ`: `ω = Kp·e_φ + Ki·∫e_φ·dt + Kd·Δe_φ/dt`
-   - Clamps: integral wind-up `±1.0`, angular command `±0.4 rad/s`
-   - Command published as `(linear.x = 0, linear.y = 0, angular.z = ω)`
-6. Exits the per-waypoint loop when `|e_φ| ≤ 0.01 rad`; emits a 0.5 s zero-twist burst (`stop()`) between segments before advancing
+1. A single-node executable `turn_controller` subscribes to `/odometry/filtered` (`nav_msgs/Odometry`) and publishes `geometry_msgs/Twist` on `/cmd_vel`. A `50 ms` wall-timer drives the control loop (20 Hz)
+2. `odomCallback` extracts the current yaw `φ` from the pose quaternion via `tf2::impl::getYaw`
+3. On construction, `SelectWaypoints()` loads the yaw sequence for the requested scene (scene `2` is the default when no CLI argument is given)
+4. On each waypoint change, the target heading is **latched once**: `target_yaw = wrapPi(current_yaw + dphi)`. The PID state (error history, integral, filtered derivative, last-tick clock) is reset so no stale state leaks between segments
+5. Per tick:
+   - `dt` is measured with `rclcpp::Clock(RCL_ROS_TIME)` and clamped to `[1 ms, 200 ms]` to survive startup gaps
+   - Wrapped error `e_φ = wrapPi(target_yaw − current_yaw)`
+   - Raw derivative `d_raw = (e_φ − prev_e_φ) / dt`, passed through a **first-order low-pass filter** `d_filt = α·d_raw + (1−α)·d_filt_prev` with `α = 0.2`
+   - Unsaturated command `ω = Kp·e_φ + Kd·d_filt + Ki·∫e_φ dt`
+   - Saturation to `±max_ang_vel` (`0.9 rad/s`)
+   - **Conditional anti-windup**: integral is updated (and clamped to `±int_limit`) **only** when the command is not pushing further into saturation in the same sign as the error. With `Ki = 0` in the current tuning, the integral branch is effectively dormant — kept in the code path so the structure is ready if you need to re-enable I-action
+6. Acceptance: `|e_φ| < 0.03 rad` → publish a zero-twist, mark the waypoint reached, start a **2 s pause**; the next waypoint latches a fresh target yaw when the pause ends
+7. After the final waypoint, `stopRobot()` publishes five zero-twists to guarantee the robot settles, then `rclcpp::shutdown()` is called
 
 ### PID Configuration
 
-| Gain | Value |
-|------|-------|
-| `Kp` | `0.5`  |
-| `Ki` | `0.05` |
-| `Kd` | `0.1`  |
-| Integral clamp `I_MAX` | `1.0`  |
-| Max angular speed `W_MAX` | `0.4 rad/s` |
-| Angular tolerance `ang_tol` | `0.01 rad` |
+| Parameter | Value |
+|---|---|
+| `Kp` | `1.5`  |
+| `Ki` | `0.0` (integral dormant by design) |
+| `Kd` | `0.10` |
+| Derivative filter `α` | `0.2` |
+| Integral clamp `int_limit_` | `0.5` |
+| Max angular speed `max_ang_vel_` | `0.9 rad/s` |
+| Yaw tolerance `yaw_tol_` | `0.03 rad` (~`1.72°`) |
+| Control period | `50 ms` (20 Hz) |
+| Inter-waypoint pause | `2.0 s` |
 
 ## Waypoint Scenes
 
-Both scenes are relative `(_, _, dφ)` triplets — only the third component is consumed:
+Waypoints are `(dx, dy, dphi)` triplets — only `dphi` is consumed by this node; `dx` and `dy` are always `0`. Yaw deltas are **in the body frame** and accumulate relative to the yaw measured when the segment starts.
 
 ### Scene 1 — Simulation (`scene_number = 1`)
 
 ```
-dφ = -1.00, +0.85, +0.70  (rad)
+dφ = -0.9120, +0.7576, +0.8504  (rad)
 ```
 
-### Scene 2 — CyberWorld (`scene_number = 2`)
+Net yaw: `+0.6960 rad` (`+39.9°`)
+
+### Scene 2 — CyberWorld, default (`scene_number = 2`)
 
 ```
-dφ = -0.50, -0.80, +1.30  (rad)
+dφ = -0.5350, -0.7950, +1.3110  (rad)
 ```
+
+Net yaw: `−0.019 rad` (~`0` — returns to the original heading, giving a closed-loop drift check)
 
 ## Real Robot Deployment (CyberWorld)
 
@@ -58,29 +68,31 @@ dφ = -0.50, -0.80, +1.30  (rad)
   <img src="media/waypoints-real.png" alt="Real ROSBot XL turn-controller yaw trace recorded in CyberWorld" width="650"/>
 </p>
 
-The same executable runs **unmodified** on the real Husarion ROSBot XL in The Construct's **CyberWorld** lab — only the scene number changes. The `scene_number = 2` yaw sequence (`-0.50, -0.80, +1.30 rad`) is tuned so the robot stays inside the physical arena without clipping walls:
+The same executable runs **unmodified** on the real Husarion ROSBot XL in The Construct's **CyberWorld** lab. Scene `2` is the default, so launching without any argument already runs the physical-robot yaw sequence:
 
 1. The ROSBot XL real-robot stack (`rosbot_xl_ros` + EKF + wheel controllers) runs on the physical robot; `/odometry/filtered` is streamed to the development machine
-2. The `turn_controller` node is launched locally with `scene_number = 2`:
+2. Launch the controller locally — either explicit or with the default:
 
    ```bash
-   ros2 run turn_controller turn_controller 2
+   ros2 run turn_controller turn_controller        # defaults to scene 2
+   ros2 run turn_controller turn_controller 2      # explicit
    ```
-3. The quaternion → yaw extraction (`tf2::Matrix3x3::getRPY`) works identically on real odometry — the EKF publishes the same `nav_msgs/Odometry` contract
-4. The real-robot trace validates:
-   - `ang_tol = 0.01 rad` (~0.57°) is reachable on hardware without chattering thanks to the `W_MAX = 0.4 rad/s` cap + `25 ms` control loop
-   - The net accumulated yaw `-0.50 − 0.80 + 1.30 = 0 rad` returns the robot to its original heading — a good closed-loop sanity check
-   - Integral wind-up clamp (`±1.0`) absorbs the larger `0.80 rad` second segment without overshoot
+3. `tf2::impl::getYaw` works identically on real odometry — the EKF publishes the same `nav_msgs/Odometry` contract
+4. Real-robot tuning choices that matter:
+   - **Filtered D-term** (`α = 0.2`) kills the high-frequency jitter that an unfiltered derivative picks up from the real IMU/odom fusion
+   - **Conditional anti-windup** protects the integrator while the command is saturated — important when `Ki` is eventually re-enabled for sustained biases
+   - `yaw_tol = 0.03 rad` (~`1.72°`) is chattering-safe on the real robot at `0.9 rad/s` cap — the earlier `0.01 rad` tolerance caused oscillation around the goal
+   - The `−0.535, −0.795, +1.311 rad` sequence sums to `~0` so any accumulated drift is immediately visible at the end of the run
 
 ### Sim ↔ real parity
 
-| Concern | Simulation (scene 1) | Real CyberWorld (scene 2) |
+| Concern | Simulation (scene 1) | Real CyberWorld (scene 2, default) |
 |---|---|---|
 | Feedback topic | `/odometry/filtered` | `/odometry/filtered` |
-| Turn sequence | `-1.00, +0.85, +0.70 rad` | `-0.50, -0.80, +1.30 rad` |
-| Net yaw | `+0.55 rad` | `0 rad` (returns to start) |
-| PID gains | `Kp=0.5, Ki=0.05, Kd=0.1` | `Kp=0.5, Ki=0.05, Kd=0.1` (unchanged) |
-| Tolerance | `0.01 rad` | `0.01 rad` |
+| Turn sequence | `-0.912, +0.7576, +0.8504 rad` | `-0.535, -0.795, +1.311 rad` |
+| Net yaw | `+0.696 rad` | `≈ 0 rad` (returns to start) |
+| PID gains | `Kp=1.5, Ki=0.0, Kd=0.10` | `Kp=1.5, Ki=0.0, Kd=0.10` (unchanged) |
+| Tolerance | `0.03 rad` | `0.03 rad` |
 | Clock | sim time | wall clock |
 
 ## ROS 2 Interface
@@ -88,7 +100,6 @@ The same executable runs **unmodified** on the real Husarion ROSBot XL in The Co
 | Name | Type | Description |
 |---|---|---|
 | `/odometry/filtered` | `nav_msgs/Odometry` (sub) | EKF-fused odometry consumed as yaw feedback |
-| `/rosbot_xl_base_controller/odom` | `nav_msgs/Odometry` | Raw wheel odometry (alternate, commented in source) |
 | `/cmd_vel` | `geometry_msgs/Twist` (pub) | Pure rotation command (`angular.z`, linear channels zeroed) |
 
 ## Project Structure
@@ -133,7 +144,8 @@ ros2 run turn_controller turn_controller 1
 ### Real robot (CyberWorld)
 
 ```bash
-ros2 run turn_controller turn_controller 2
+ros2 run turn_controller turn_controller        # scene 2 is the default
+ros2 run turn_controller turn_controller 2      # or explicit
 ```
 
 ### Sanity checks
@@ -145,10 +157,13 @@ ros2 topic echo /odometry/filtered
 
 ## Key Concepts Covered
 
-- **PID on heading error**: integral wind-up clamp, discrete derivative term, command saturation
-- **Yaw from quaternion**: `tf2::Quaternion` → `tf2::Matrix3x3::getRPY` to get a usable Euler yaw
-- **Real-time timing**: `std::chrono::steady_clock` for `dt`, 25 ms control period
-- **Scene switching via CLI**: same executable drives sim and real robot by selecting a waypoint table
+- **PD with filtered derivative**: first-order low-pass on the discrete derivative (`α = 0.2`) to tame sensor noise
+- **Conditional anti-windup**: the integrator only accumulates when the command is not saturated in the same direction as the error — robust even with `Ki = 0` in place for future tuning
+- **Per-segment state reset**: error, integral, filtered derivative, and last-tick clock are zeroed on every waypoint change
+- **Measured `dt`**: `rclcpp::Clock` sampled per tick and clamped to `[1 ms, 200 ms]` — survives startup hiccups and long-pause resumptions
+- **Yaw from quaternion**: `tf2::impl::getYaw` on the EKF pose quaternion
+- **Angle wrapping**: `wrapPi` via `atan2(sin, cos)` keeps both target and error inside `[−π, π]` so accumulated yaw never drifts outside the valid range
+- **Default scene = real**: omitting the CLI argument runs the CyberWorld sequence — matching the checkpoint's "real-robot first" posture
 - **Pure rotation command**: zero linear channels so the holonomic platform rotates in place
 
 ## Technologies
